@@ -1,0 +1,46 @@
+# Secrets — must never be committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build
+target/
+*.jar
+*.war
+*.class
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+nb-configuration.xml
+nbactions.xml
+nbproject/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / coverage
+*.log
+*.log.[0-9]*
+databricks_jdbc.log*
+hs_err_pid*.log
+replay_pid*.log
+**/jacoco.exec
+
+# Test artifacts
+**/surefire-reports/
+**/failsafe-reports/
+
+# Local-only convenience
+/tmp/
+local-*.properties

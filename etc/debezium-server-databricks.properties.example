@@ -1,0 +1,29 @@
+# Sample Debezium Server application.properties for the Databricks source connector.
+# Copy into your Debezium Server config dir as `application.properties` (or whichever
+# the server expects) and fill in secrets.
+
+debezium.source.connector.class=io.debezium.connector.databricks.DatabricksConnector
+debezium.source.offset.storage=org.apache.kafka.connect.storage.FileOffsetBackingStore
+debezium.source.offset.storage.file.filename=/var/lib/debezium-server/offsets.dat
+debezium.source.offset.flush.interval.ms=10000
+
+debezium.source.name=databricks
+debezium.source.topic.prefix=prod-databricks
+
+debezium.source.databricks.workspace.host=adb-XXXXXXXXXXXXXXXX.X.azuredatabricks.net
+debezium.source.databricks.warehouse.http.path=/sql/1.0/warehouses/XXXXXXXXXXXX
+debezium.source.databricks.auth.type=azure-entra-sp
+debezium.source.databricks.entra.tenant.id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+debezium.source.databricks.entra.client.id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+debezium.source.databricks.entra.client.secret=${env:DATABRICKS_SP_SECRET}
+
+debezium.source.databricks.catalog=main
+debezium.source.schema.include.list=main\\.banking
+debezium.source.table.include.list=main\\.banking\\.(customer|account|transaction)
+debezium.source.snapshot.mode=initial
+debezium.source.cdf.poll.interval.ms=5000
+
+# Example sink: stdout (replace with Kinesis/PubSub/EventHubs/etc. for real use).
+debezium.sink.type=test
+debezium.format.key=json
+debezium.format.value=json
