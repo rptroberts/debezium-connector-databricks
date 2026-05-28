@@ -25,8 +25,9 @@ class DatabricksOffsetContextTest {
         TableId t1 = new TableId("main", "banking", "customer");
         TableId t2 = new TableId("main", "banking", "account");
 
-        ctx.recordCommit(t1, 42L, Instant.ofEpochMilli(1716_000_000_000L), false);
-        ctx.recordCommit(t2, 99L, Instant.ofEpochMilli(1717_000_000_000L), true);
+        ctx.recordCommit(t1, 42L, Instant.ofEpochMilli(1716_000_000_000L));
+        ctx.recordCommit(t2, 99L, Instant.ofEpochMilli(1717_000_000_000L));
+        ctx.markSnapshotStarted(t2);
 
         Map<String, ?> persisted = ctx.getOffset();
         DatabricksOffsetContext restored = new DatabricksOffsetContext.Loader(config).load(persisted);
@@ -51,8 +52,8 @@ class DatabricksOffsetContextTest {
         DatabricksConnectorConfig config = buildConfig();
         DatabricksOffsetContext ctx = new DatabricksOffsetContext(config, Map.of());
         TableId t = new TableId("main", "banking", "customer");
-        ctx.recordCommit(t, 10L, null, false);
-        ctx.recordCommit(t, 5L, null, false); // out-of-order should NOT regress
+        ctx.recordCommit(t, 10L, null);
+        ctx.recordCommit(t, 5L, null); // out-of-order should NOT regress
         assertThat(ctx.offsetFor(t).commitVersion()).isEqualTo(10L);
     }
 
@@ -61,7 +62,8 @@ class DatabricksOffsetContextTest {
         DatabricksConnectorConfig config = buildConfig();
         DatabricksOffsetContext ctx = new DatabricksOffsetContext(config, Map.of());
         TableId t = new TableId("main", "banking", "customer");
-        ctx.recordCommit(t, 100L, Instant.now(), true);
+        ctx.markSnapshotStarted(t);
+        ctx.recordCommit(t, 100L, Instant.now());
         ctx.markSnapshotCompleted(t);
         // Sanity: snapshot was completed
         assertThat(ctx.offsetFor(t).snapshotCompleted()).isTrue();
@@ -81,8 +83,8 @@ class DatabricksOffsetContextTest {
         TableId t = new TableId("main", "banking", "customer");
         Instant ts10 = Instant.ofEpochMilli(1_000_000L);
         Instant ts9 = Instant.ofEpochMilli(500_000L);
-        ctx.recordCommit(t, 10L, ts10, false);
-        ctx.recordCommit(t, 9L, ts9, false); // out-of-order — should not regress
+        ctx.recordCommit(t, 10L, ts10);
+        ctx.recordCommit(t, 9L, ts9); // out-of-order — should not regress
 
         TableOffset o = ctx.offsetFor(t);
         assertThat(o.commitVersion()).isEqualTo(10L);
@@ -94,7 +96,8 @@ class DatabricksOffsetContextTest {
         DatabricksConnectorConfig config = buildConfig();
         DatabricksOffsetContext ctx = new DatabricksOffsetContext(config, Map.of());
         TableId t = new TableId("main", "banking", "customer");
-        ctx.recordCommit(t, 100L, Instant.now(), true);
+        ctx.markSnapshotStarted(t);
+        ctx.recordCommit(t, 100L, Instant.now());
         ctx.markSnapshotCompleted(t);
         assertThat(ctx.offsetFor(t).snapshotting()).isFalse();
         assertThat(ctx.offsetFor(t).snapshotCompleted()).isTrue();

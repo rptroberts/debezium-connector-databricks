@@ -22,15 +22,41 @@ import io.debezium.spi.schema.DataCollectionId;
  * Offset context carrying per-table {@code _commit_version} watermarks.
  *
  * <p>The partition key is server-wide; per-table positions live in the offset
- * value as a nested map. On restart the loader rehydrates the full map.
+ * value as flat {@code tables||<tableId>||<field>} entries (so the Embedded
+ * Engine's primitive-only offset store accepts them, and a {@code .} inside an
+ * identifier can't collide with the delimiter).
  */
 public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     public static final String PER_TABLE_KEY = "tables";
+    /**
+     * Separator placed between the {@link #PER_TABLE_KEY} prefix and the table id,
+     * and between the table id and the field name. Two pipes were chosen
+     * because they cannot appear in any Spark/Delta identifier (the pipe is
+     * reserved by SQL) — this makes round-tripping safe for arbitrary names.
+     */
+    private static final String DELIMITER = "||";
     public static final String COMMIT_VERSION_KEY = "commit_version";
     public static final String COMMIT_TIMESTAMP_KEY = "commit_timestamp_ms";
-    public static final String SNAPSHOT_KEY = "snapshot";
-    public static final String SNAPSHOT_COMPLETED_KEY = "snapshot_completed";
+    public static final String SNAPSHOT_PHASE_KEY = "snapshot_phase";
+
+    /** Phase a table is in with respect to its initial snapshot. */
+    public enum SnapshotPhase {
+        /** No snapshot has been started; either snapshot.mode says not to, or we just started. */
+        NOT_STARTED,
+        /** Snapshot is running; rows being emitted as op=r. */
+        IN_PROGRESS,
+        /** Snapshot completed; CDF streaming is active. */
+        COMPLETED;
+
+        public boolean isSnapshotting() {
+            return this == IN_PROGRESS;
+        }
+
+        public boolean isCompleted() {
+            return this == COMPLETED;
+        }
+    }
 
     private final Map<TableId, TableOffset> tableOffsets = new ConcurrentHashMap<>();
     private final TransactionContext transactionContext;
@@ -47,12 +73,17 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
         return tableOffsets.computeIfAbsent(tableId, k -> TableOffset.empty());
     }
 
-    public void recordCommit(TableId tableId, long commitVersion, Instant commitTimestamp, boolean snapshotting) {
+    /**
+     * Advance the table's commit version + timestamp. Does not touch
+     * {@link SnapshotPhase} — callers use {@link #markSnapshotStarted},
+     * {@link #markSnapshotCompleted}, or {@link #resetForResnapshot} for phase
+     * transitions.
+     */
+    public void recordCommit(TableId tableId, long commitVersion, Instant commitTimestamp) {
         tableOffsets.merge(tableId,
-                new TableOffset(commitVersion, commitTimestamp, snapshotting, !snapshotting),
+                new TableOffset(commitVersion, commitTimestamp, SnapshotPhase.NOT_STARTED),
                 (oldV, newV) -> {
                     long winnerVersion = Math.max(oldV.commitVersion, newV.commitVersion);
-                    // Keep the timestamp paired with the winning version, not the most recent write.
                     Instant winnerTs;
                     if (newV.commitVersion >= oldV.commitVersion && newV.commitTimestamp != null) {
                         winnerTs = newV.commitTimestamp;
@@ -60,9 +91,18 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
                     else {
                         winnerTs = oldV.commitTimestamp != null ? oldV.commitTimestamp : newV.commitTimestamp;
                     }
-                    return new TableOffset(winnerVersion, winnerTs, newV.snapshotting,
-                            newV.snapshotCompleted || oldV.snapshotCompleted);
+                    return new TableOffset(winnerVersion, winnerTs, oldV.phase);
                 });
+    }
+
+    public void markSnapshotStarted(TableId tableId) {
+        TableOffset cur = offsetFor(tableId);
+        tableOffsets.put(tableId, new TableOffset(cur.commitVersion, cur.commitTimestamp, SnapshotPhase.IN_PROGRESS));
+    }
+
+    public void markSnapshotCompleted(TableId tableId) {
+        TableOffset cur = offsetFor(tableId);
+        tableOffsets.put(tableId, new TableOffset(cur.commitVersion, cur.commitTimestamp, SnapshotPhase.COMPLETED));
     }
 
     /** Forcefully reset to "needs initial snapshot" state — used by the RESNAPSHOT disruptive-op handler. */
@@ -70,27 +110,20 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
         tableOffsets.put(tableId, TableOffset.empty());
     }
 
-    public void markSnapshotCompleted(TableId tableId) {
-        TableOffset cur = offsetFor(tableId);
-        tableOffsets.put(tableId, new TableOffset(cur.commitVersion, cur.commitTimestamp, false, true));
-    }
-
     @Override
     public Map<String, ?> getOffset() {
-        // The Embedded Engine's offset backing store (and Kafka Connect's) accepts only
-        // primitive types in the offset value, so we flatten per-table offsets to a single
-        // serialized field: one string entry per (commit_version | commit_timestamp_ms | snapshot | snapshot_completed)
-        // keyed by `<catalog>.<schema>.<table>.<field>`.
+        // Embedded Engine's offset stores accept only primitive types. Flatten the per-table map
+        // to entries `tables||<tableId>||<field>` to survive both the Kafka offset writer and
+        // the file-backed embedded store.
         Map<String, Object> out = new HashMap<>();
         for (Map.Entry<TableId, TableOffset> e : tableOffsets.entrySet()) {
-            String prefix = PER_TABLE_KEY + "." + e.getKey().identifier() + ".";
+            String prefix = PER_TABLE_KEY + DELIMITER + e.getKey().identifier() + DELIMITER;
             TableOffset off = e.getValue();
             out.put(prefix + COMMIT_VERSION_KEY, off.commitVersion);
             if (off.commitTimestamp != null) {
                 out.put(prefix + COMMIT_TIMESTAMP_KEY, off.commitTimestamp.toEpochMilli());
             }
-            out.put(prefix + SNAPSHOT_KEY, off.snapshotting);
-            out.put(prefix + SNAPSHOT_COMPLETED_KEY, off.snapshotCompleted);
+            out.put(prefix + SNAPSHOT_PHASE_KEY, off.phase.name());
         }
         return out;
     }
@@ -102,7 +135,7 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
 
     @Override
     public boolean isInitialSnapshotRunning() {
-        return tableOffsets.values().stream().anyMatch(t -> t.snapshotting);
+        return tableOffsets.values().stream().anyMatch(t -> t.phase == SnapshotPhase.IN_PROGRESS);
     }
 
     @Override
@@ -143,10 +176,20 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
     }
 
     /** Per-table offset record. */
-    public record TableOffset(long commitVersion, Instant commitTimestamp, boolean snapshotting, boolean snapshotCompleted) {
+    public record TableOffset(long commitVersion, Instant commitTimestamp, SnapshotPhase phase) {
 
         public static TableOffset empty() {
-            return new TableOffset(-1L, null, false, false);
+            return new TableOffset(-1L, null, SnapshotPhase.NOT_STARTED);
+        }
+
+        /** True if the table is currently being snapshotted. */
+        public boolean snapshotting() {
+            return phase == SnapshotPhase.IN_PROGRESS;
+        }
+
+        /** True iff initial snapshot has finished. */
+        public boolean snapshotCompleted() {
+            return phase == SnapshotPhase.COMPLETED;
         }
 
         public Map<String, Object> toMap() {
@@ -155,8 +198,7 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
             if (commitTimestamp != null) {
                 m.put(COMMIT_TIMESTAMP_KEY, commitTimestamp.toEpochMilli());
             }
-            m.put(SNAPSHOT_KEY, snapshotting);
-            m.put(SNAPSHOT_COMPLETED_KEY, snapshotCompleted);
+            m.put(SNAPSHOT_PHASE_KEY, phase.name());
             return m;
         }
 
@@ -169,9 +211,29 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
             long v = vRaw == null ? -1L : ((Number) vRaw).longValue();
             Object tsRaw = m.get(COMMIT_TIMESTAMP_KEY);
             Instant ts = tsRaw == null ? null : Instant.ofEpochMilli(((Number) tsRaw).longValue());
-            boolean snap = Boolean.TRUE.equals(m.get(SNAPSHOT_KEY));
-            boolean done = Boolean.TRUE.equals(m.get(SNAPSHOT_COMPLETED_KEY));
-            return new TableOffset(v, ts, snap, done);
+            SnapshotPhase phase = parsePhase(m);
+            return new TableOffset(v, ts, phase);
+        }
+
+        private static SnapshotPhase parsePhase(Map<String, ?> m) {
+            Object raw = m.get(SNAPSHOT_PHASE_KEY);
+            if (raw != null) {
+                try {
+                    return SnapshotPhase.valueOf(raw.toString());
+                }
+                catch (IllegalArgumentException ignored) {
+                }
+            }
+            // Backwards-compat with the pre-0.2 boolean encoding.
+            Object oldSnapshotting = m.get("snapshot");
+            Object oldCompleted = m.get("snapshot_completed");
+            if (Boolean.TRUE.equals(oldCompleted)) {
+                return SnapshotPhase.COMPLETED;
+            }
+            if (Boolean.TRUE.equals(oldSnapshotting)) {
+                return SnapshotPhase.IN_PROGRESS;
+            }
+            return SnapshotPhase.NOT_STARTED;
         }
     }
 
@@ -188,8 +250,7 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
         public DatabricksOffsetContext load(Map<String, ?> offset) {
             Map<TableId, TableOffset> rehydrated = new HashMap<>();
             if (offset != null) {
-                String prefix = PER_TABLE_KEY + ".";
-                // Group flat keys "<prefix>.<table-id>.<field>" back into per-table maps.
+                String prefix = PER_TABLE_KEY + DELIMITER;
                 Map<String, Map<String, Object>> tablesByName = new HashMap<>();
                 for (Map.Entry<String, ?> e : offset.entrySet()) {
                     String k = e.getKey();
@@ -197,12 +258,12 @@ public class DatabricksOffsetContext extends CommonOffsetContext<SourceInfo> {
                         continue;
                     }
                     String rest = k.substring(prefix.length());
-                    int lastDot = rest.lastIndexOf('.');
-                    if (lastDot < 0) {
+                    int sep = rest.lastIndexOf(DELIMITER);
+                    if (sep < 0) {
                         continue;
                     }
-                    String tableId = rest.substring(0, lastDot);
-                    String field = rest.substring(lastDot + 1);
+                    String tableId = rest.substring(0, sep);
+                    String field = rest.substring(sep + DELIMITER.length());
                     tablesByName
                             .computeIfAbsent(tableId, x -> new HashMap<>())
                             .put(field, e.getValue());

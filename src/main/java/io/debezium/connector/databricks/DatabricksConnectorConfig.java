@@ -359,10 +359,20 @@ public class DatabricksConnectorConfig extends CommonConnectorConfig {
     }
 
     private final Configuration raw;
+    // Compiled-pattern caches. CommonConnectorConfig is constructed per-task lifetime,
+    // so these are effectively per-task immutable.
+    private final List<Pattern> schemaIncludePatterns;
+    private final List<Pattern> schemaExcludePatterns;
+    private final List<Pattern> tableIncludePatterns;
+    private final List<Pattern> tableExcludePatterns;
 
     public DatabricksConnectorConfig(Configuration config) {
         super(config, 0);
         this.raw = config;
+        this.schemaIncludePatterns = parsePatternList(raw.getString(SCHEMA_INCLUDE_LIST));
+        this.schemaExcludePatterns = parsePatternList(raw.getString(SCHEMA_EXCLUDE_LIST));
+        this.tableIncludePatterns = parsePatternList(raw.getString(TABLE_INCLUDE_LIST));
+        this.tableExcludePatterns = parsePatternList(raw.getString(TABLE_EXCLUDE_LIST));
     }
 
     public Configuration rawConfig() {
@@ -412,19 +422,28 @@ public class DatabricksConnectorConfig extends CommonConnectorConfig {
     }
 
     public List<Pattern> schemaIncludePatterns() {
-        return parsePatternList(raw.getString(SCHEMA_INCLUDE_LIST));
+        return schemaIncludePatterns;
     }
 
     public List<Pattern> schemaExcludePatterns() {
-        return parsePatternList(raw.getString(SCHEMA_EXCLUDE_LIST));
+        return schemaExcludePatterns;
     }
 
     public List<Pattern> tableIncludePatterns() {
-        return parsePatternList(raw.getString(TABLE_INCLUDE_LIST));
+        return tableIncludePatterns;
     }
 
     public List<Pattern> tableExcludePatterns() {
-        return parsePatternList(raw.getString(TABLE_EXCLUDE_LIST));
+        return tableExcludePatterns;
+    }
+
+    /** Raw include-list strings (uncompiled), for use by SQL pushdown. */
+    public String schemaIncludeListRaw() {
+        return raw.getString(SCHEMA_INCLUDE_LIST);
+    }
+
+    public String tableIncludeListRaw() {
+        return raw.getString(TABLE_INCLUDE_LIST);
     }
 
     public SnapshotMode snapshotMode() {
@@ -500,10 +519,10 @@ public class DatabricksConnectorConfig extends CommonConnectorConfig {
     public boolean isTableIncluded(TableId tid) {
         String full = tid.identifier();
         String schemaQualified = tid.catalog() + "." + tid.schema();
-        return matchesAny(full, tableIncludePatterns(), true)
-                && !matchesAny(full, tableExcludePatterns(), false)
-                && matchesAny(schemaQualified, schemaIncludePatterns(), true)
-                && !matchesAny(schemaQualified, schemaExcludePatterns(), false);
+        return matchesAny(full, tableIncludePatterns, true)
+                && !matchesAny(full, tableExcludePatterns, false)
+                && matchesAny(schemaQualified, schemaIncludePatterns, true)
+                && !matchesAny(schemaQualified, schemaExcludePatterns, false);
     }
 
     private static boolean matchesAny(String s, List<Pattern> patterns, boolean defaultWhenEmpty) {

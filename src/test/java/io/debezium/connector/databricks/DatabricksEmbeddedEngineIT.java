@@ -65,7 +65,9 @@ class DatabricksEmbeddedEngineIT {
         setupConnection = new DatabricksConnection(setupConfig);
         setupConnection.selfTest();
         setupConnection.execute("CREATE TABLE `" + table.catalog() + "`.`" + table.schema() + "`.`" + table.table() +
-                "` (id BIGINT, name STRING) USING DELTA TBLPROPERTIES (delta.enableChangeDataFeed = true)");
+                "` (id BIGINT NOT NULL, name STRING, " +
+                " CONSTRAINT " + table.table() + "_pk PRIMARY KEY (id)) " +
+                "USING DELTA TBLPROPERTIES (delta.enableChangeDataFeed = true)");
         setupConnection.execute("INSERT INTO `" + table.catalog() + "`.`" + table.schema() + "`.`" + table.table() +
                 "` VALUES (1, 'seed-row')");
     }

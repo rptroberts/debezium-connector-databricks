@@ -54,10 +54,12 @@ class DatabricksCdfIT {
         connection = new DatabricksConnection(config);
         connection.selfTest();
 
-        // Drop if exists (idempotent), create with CDF enabled.
+        // Drop if exists (idempotent), create with CDF enabled and a primary key so
+        // pre/post-image pairing actually fires for the UPDATE event.
         connection.execute("DROP TABLE IF EXISTS `" + testTable.catalog() + "`.`" + testTable.schema() + "`.`" + testTable.table() + "`");
         connection.execute("CREATE TABLE `" + testTable.catalog() + "`.`" + testTable.schema() + "`.`" + testTable.table() + "` (" +
-                " id BIGINT, name STRING, amount DECIMAL(18,2)) USING DELTA " +
+                " id BIGINT NOT NULL, name STRING, amount DECIMAL(18,2), " +
+                " CONSTRAINT " + testTable.table() + "_pk PRIMARY KEY (id)) USING DELTA " +
                 "TBLPROPERTIES (delta.enableChangeDataFeed = true)");
         LOG.info("Created test table {} with CDF enabled", testTable.identifier());
     }
